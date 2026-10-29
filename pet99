@@ -1,0 +1,677 @@
+-- Classic Event menu in a Rayfield window (open source UI: https://github.com/SiriusSoftwareLtd/Rayfield) with tabs:
+-- Farm (send pets buttons, hatch eggs, Pet Speed), Gamepasses (Fast hatch, Hoverboard, Teleport, Orb Magnet), Settings (hide key,
+-- low device mode, hide pets / players, black screen, FPS cap).
+-- Works on PC and phone. Everything only changes things on your side; the game sends its own requests.
+-- K hides / shows the window (changeable in Settings).
+if not game:IsLoaded() then game.Loaded:Wait() end
+local env = getgenv()
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Library = require(game.ReplicatedStorage:WaitForChild("Framework"):WaitForChild("Library"))
+while not Library.Loaded do task.wait(0.5) end
+
+-- close an older copy (old small window or an older Rayfield window)
+local parent = (gethui and gethui()) or game:GetService("CoreGui")
+if parent:FindFirstChild("ClassicEventMenu") then parent.ClassicEventMenu:Destroy() end
+if env.ClassicRayfield then pcall(function() env.ClassicRayfield:Destroy() end) end
+env.OrbMagnetOn, env.PetSpeedOn = false, false -- stops loops from an older copy
+task.wait(0.1)
+
+env.MenuOrb = env.MenuOrb == nil and true or env.MenuOrb
+env.MenuSpeed = env.MenuSpeed == nil and true or env.MenuSpeed
+env.PetSpeedValue = env.PetSpeedValue or 300
+env.MenuHover = env.MenuHover == nil and true or env.MenuHover
+env.MenuHoverBoard = env.MenuHoverBoard or "Diamond"
+local runId = {}
+
+-- Hoverboard: puts a board in your save on your side only, then the game's own Q key / hoverboard button rides it.
+-- Other players don't see it. A board you really own is never touched.
+local function hoverScript()
+	return getsenv(LocalPlayer.PlayerScripts.Scripts.Game.Hoverboard)
+end
+local function ownsBoard(s, name)
+	return s.Hoverboards and (s.Hoverboards[name] or table.find(s.Hoverboards, name)) and true or false
+end
+local function setHoverboard(on)
+	pcall(function()
+		local s = Library.Save.Get()
+		local current = s.EquippedHoverboard
+		local fake = current ~= "" and not ownsBoard(s, current)
+		if on and (current == "" or (fake and current ~= env.MenuHoverBoard)) then
+			setreadonly(s, false)
+			s.EquippedHoverboard = env.MenuHoverBoard
+			if Library.Variables.UsingHoverboard then hoverScript().Create(LocalPlayer) end -- swap the board you're on
+		elseif not on and fake then
+			-- get off locally (the game's own toggle would send a request from menu code, which the game reports)
+			if Library.Variables.UsingHoverboard then
+				Library.Variables.UsingHoverboard = false
+				hoverScript().Remove(LocalPlayer)
+				hoverScript().UpdateButton()
+			end
+			setreadonly(s, false)
+			s.EquippedHoverboard = ""
+		end
+	end)
+end
+env.ClassicMenuRun = runId
+
+-- the features: one loop, every second
+task.spawn(function()
+	while env.ClassicMenuRun == runId do
+		if env.MenuOrb then
+			pcall(function()
+				local orbs = getsenv(LocalPlayer.PlayerScripts.Scripts.Game.Orbs)
+				debug.setupvalue(orbs.UpdatePickupDistance, 3, math.huge)
+			end)
+		end
+		pcall(function()
+			local s = Library.Save.Get()
+			local want = env.MenuSpeed and env.PetSpeedValue or nil
+			if s and s.Upgrades and s.Upgrades["Pet Walkspeed"] ~= want then
+				setreadonly(s.Upgrades, false)
+				s.Upgrades["Pet Walkspeed"] = want
+			end
+		end)
+		if env.MenuHover then setHoverboard(true) end
+		task.wait(1)
+	end
+end)
+
+-- Send all: a quick click on a coin acts like the game's hold-click, so every pet goes to it. Only the "one pet /
+-- all pets" flag is changed; the game's own scripts still send the request to the server.
+env.MenuSendAll = env.MenuSendAll == nil and true or env.MenuSendAll
+pcall(function()
+	local coins = getsenv(LocalPlayer.PlayerScripts.Scripts.Game["Select Coins"])
+	env.ClassicOriginalSelect = env.ClassicOriginalSelect or coins.SelectCoin
+	local original = env.ClassicOriginalSelect
+	coins.SelectCoin = function(coin, all)
+		return original(coin, all or (env.MenuSendAll and env.ClassicMenuRun ~= nil))
+	end
+end)
+
+-- IMPORTANT: the game's Network module blocks and reports (_G.Blunder) any request whose call stack contains executor
+-- code. So the menu never calls game functions that talk to the server; it only changes what the game's own code reads.
+
+-- Teleport: the game's teleport menu treats every area you've unlocked as if you bought its teleport, so the game's own
+-- click code does the teleport. Locked areas stay locked.
+env.MenuTeleport = env.MenuTeleport == nil and true or env.MenuTeleport
+pcall(function()
+	-- undo the old version's Clicked hook (it called the teleport from menu code, which the game reports)
+	local tp = getsenv(LocalPlayer.PlayerScripts.Scripts.GUIs.Teleport)
+	if env.ClassicOriginalClicked then tp.Clicked = env.ClassicOriginalClicked end
+end)
+pcall(function()
+	local world = Library.WorldCmds
+	env.ClassicOriginalHasTeleport = env.ClassicOriginalHasTeleport or world.HasTeleport
+	local original = env.ClassicOriginalHasTeleport
+	world.HasTeleport = function(area, ...)
+		if env.MenuTeleport and env.ClassicMenuRun ~= nil and world.HasArea(area) then return true end
+		return original(area, ...)
+	end
+end)
+-- the "Teleport to" dropdown just moves you onto the area's teleport pad (nothing is sent to the server)
+local function teleportTo(area)
+	local pad = Library.WorldCmds.GetMap().Teleports:FindFirstChild(area)
+	local char = LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not (pad and hum and root) then return false, "Can't teleport there right now." end
+	char:PivotTo(pad.CFrame + pad.CFrame.UpVector * (hum.HipHeight + root.Size.Y / 2))
+	return true
+end
+
+-- Fast hatch: the egg animation acts as if you own "Skip Egg Open" (click to skip, and skipped by itself while
+-- Auto Hatch is on). Only the animation changes; the server already picked the pets before it starts.
+env.MenuFastHatch = env.MenuFastHatch == nil and true or env.MenuFastHatch
+pcall(function()
+	local passes = Library.Gamepasses
+	local skipId = Library.Directory.Gamepasses["Skip Egg Open"].ID
+	env.ClassicOriginalOwns = env.ClassicOriginalOwns or passes.Owns
+	local original = env.ClassicOriginalOwns
+	setreadonly(passes, false)
+	passes.Owns = function(id, ...)
+		if id == skipId and env.MenuFastHatch and env.ClassicMenuRun ~= nil then return true end
+		return original(id, ...)
+	end
+end)
+
+-- turning the magnet off: let the game work out the normal distance again
+local function resetOrbs()
+	pcall(function()
+		getsenv(LocalPlayer.PlayerScripts.Scripts.Game.Orbs).UpdatePickupDistance()
+	end)
+end
+
+-- Optimization (Settings tab). Everything here only changes what your own screen draws.
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+env.MenuHideKey = env.MenuHideKey or "K"
+env.MenuLowMode = env.MenuLowMode or false
+env.MenuHidePets = env.MenuHidePets or false
+env.MenuHidePlayers = env.MenuHidePlayers or false
+env.MenuNo3D = env.MenuNo3D or false
+env.MenuFps = env.MenuFps or 60
+
+-- Low device mode: lowest quality, no shadows, no post effects, no particles; everything is put back when turned off
+local lowSaved = env.ClassicLowSaved or {} -- kept across re-runs so turning it off still restores everything
+env.ClassicLowSaved = lowSaved
+local function lowOne(obj)
+	if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Smoke") or obj:IsA("Fire")
+		or obj:IsA("Sparkles") or obj:IsA("PostEffect") then
+		if obj.Enabled then
+			lowSaved[obj] = { Enabled = true }
+			obj.Enabled = false
+		end
+	elseif obj:IsA("BasePart") and (obj.Material ~= Enum.Material.SmoothPlastic or obj.Reflectance ~= 0) then
+		lowSaved[obj] = { Material = obj.Material, Reflectance = obj.Reflectance }
+		obj.Material, obj.Reflectance = Enum.Material.SmoothPlastic, 0
+	end
+end
+local function setLowMode(on)
+	if env.ClassicLowConn then env.ClassicLowConn:Disconnect() env.ClassicLowConn = nil end
+	if on then
+		pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+		lowSaved[Lighting] = lowSaved[Lighting] or { GlobalShadows = Lighting.GlobalShadows }
+		Lighting.GlobalShadows = false
+		pcall(function()
+			lowSaved[workspace.Terrain] = lowSaved[workspace.Terrain] or { Decoration = workspace.Terrain.Decoration }
+			workspace.Terrain.Decoration = false
+		end)
+		for _, obj in ipairs(Lighting:GetDescendants()) do pcall(lowOne, obj) end
+		for _, obj in ipairs(workspace:GetDescendants()) do pcall(lowOne, obj) end
+		env.ClassicLowConn = workspace.DescendantAdded:Connect(function(obj) pcall(lowOne, obj) end)
+	else
+		pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic end)
+		for obj, props in pairs(lowSaved) do
+			pcall(function()
+				for k, v in pairs(props) do obj[k] = v end
+			end)
+		end
+		table.clear(lowSaved)
+	end
+end
+
+-- Hide other players' pets / other players: made invisible on your screen only, checked every second
+local hidden = env.ClassicHidden or { pets = {}, players = {} }
+env.ClassicHidden = hidden
+local function hideModel(root, bucket)
+	local function hideOne(obj)
+		if obj:IsA("BasePart") or obj:IsA("Decal") then
+			bucket[obj] = bucket[obj] or "Transparency"
+			obj.LocalTransparencyModifier = 1
+		elseif (obj:IsA("BillboardGui") or obj:IsA("ParticleEmitter") or obj:IsA("Trail")) and obj.Enabled then
+			bucket[obj] = "Enabled"
+			obj.Enabled = false
+		end
+	end
+	hideOne(root)
+	for _, obj in ipairs(root:GetDescendants()) do hideOne(obj) end
+end
+local function showBucket(bucket)
+	for obj, kind in pairs(bucket) do
+		pcall(function()
+			if kind == "Enabled" then obj.Enabled = true else obj.LocalTransparencyModifier = 0 end
+		end)
+	end
+	table.clear(bucket)
+end
+local function showHidden()
+	showBucket(hidden.pets)
+	showBucket(hidden.players)
+end
+local function petOwner(pet)
+	local owner = pet:GetAttribute("Owner")
+	if owner == nil and pet:FindFirstChild("Owner") then owner = pet.Owner.Value end
+	return owner
+end
+local function isMine(owner)
+	return owner == LocalPlayer or owner == LocalPlayer.Name or owner == LocalPlayer.UserId
+end
+local function updateHidden()
+	if env.MenuHidePets then
+		local pets = workspace:FindFirstChild("__THINGS") and workspace.__THINGS:FindFirstChild("Pets")
+		for _, pet in ipairs(pets and pets:GetChildren() or {}) do
+			local owner = petOwner(pet)
+			if owner ~= nil and not isMine(owner) then hideModel(pet, hidden.pets) end
+		end
+	elseif next(hidden.pets) then
+		showBucket(hidden.pets)
+	end
+	if env.MenuHidePlayers then
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LocalPlayer and plr.Character then hideModel(plr.Character, hidden.players) end
+		end
+	elseif next(hidden.players) then
+		showBucket(hidden.players)
+	end
+end
+
+-- start with what was on last time (when the script is run again)
+if env.MenuLowMode then setLowMode(true) end
+RunService:Set3dRenderingEnabled(not env.MenuNo3D)
+task.spawn(function()
+	while env.ClassicMenuRun == runId do
+		pcall(updateHidden)
+		task.wait(1)
+	end
+end)
+
+-- Send to biggest / nearest coin: one press sends all your pets to one coin in the area you're standing in. It fires the
+-- same local signal as your own click (the game's code then talks to the server), so nothing is sent from menu code.
+local function coinPos(coin)
+	local pos = coin:FindFirstChild("POS")
+	return pos and pos.Position or coin:GetPivot().Position
+end
+local function coinsHere()
+	local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	local all = Library.Things:FindFirstChild("Coins")
+	if not (root and all) then return {}, nil end
+	-- the area you're in = the area of the closest coin
+	local area, best = nil, math.huge
+	for _, coin in ipairs(all:GetChildren()) do
+		local d = (coinPos(coin) - root.Position).Magnitude
+		if d < best then area, best = coin:GetAttribute("Area"), d end
+	end
+	local list = {}
+	for _, coin in ipairs(all:GetChildren()) do
+		local c = coin:FindFirstChild("Coin")
+		if coin:GetAttribute("Area") == area and not (c and c:GetAttribute("PreventClick")) then list[#list + 1] = coin end
+	end
+	return list, area, root.Position
+end
+local function sendPets(mode)
+	local list, area, here = coinsHere()
+	if not area or not Library.WorldCmds.HasArea(area) then return false, "No unlocked coins around you." end
+	local pick, score = nil, -math.huge
+	for _, coin in ipairs(list) do
+		local s = mode == "biggest" and (coin:GetAttribute("Health") or 0) or -(coinPos(coin) - here).Magnitude
+		if s > score then pick, score = coin, s end
+	end
+	if not pick then return false, "No coins left in " .. area .. "." end
+	Library.Signal.Fire("Group Select Coin", pick)
+	return true, (pick:GetAttribute("Name") or "Coin") .. " (" .. Library.Functions.Commas(pick:GetAttribute("Health") or 0) .. " HP)"
+end
+
+-- Hatch eggs: pick an egg, the menu puts you next to it and turns on the game's own Auto Hatch (gamepass) for it.
+-- The game then buys it every ~0.75 s like normal Auto Hatch; it stops by itself when you can't afford it anymore.
+env.MenuEgg = env.MenuEgg or nil
+local PICK_EGG = "— pick an egg —"
+local function eggStands()
+	local stands = {}
+	local eggs = Library.WorldCmds.GetMap():FindFirstChild("Eggs")
+	for _, obj in ipairs(eggs and eggs:GetDescendants() or {}) do
+		local id = obj:IsA("Model") and obj:GetAttribute("ID")
+		if id and Library.Directory.Eggs[id] and obj:GetAttribute("Unlocked") then stands[id] = obj end
+	end
+	return stands
+end
+local function eggList()
+	local names = {}
+	for id in pairs(eggStands()) do names[#names + 1] = id end
+	table.sort(names, function(a, b) return Library.Directory.Eggs[a].cost < Library.Directory.Eggs[b].cost end)
+	table.insert(names, 1, PICK_EGG)
+	return names
+end
+local function ownsAutoHatch()
+	local id = Library.Directory.Gamepasses["Auto Hatch"].ID
+	return (env.ClassicOriginalOwns or Library.Gamepasses.Owns)(id)
+end
+local function stopHatching()
+	Library.Variables.AutoHatchEnabled = false
+	Library.Variables.AutoHatchEggId = nil
+end
+local function startHatching(id)
+	if not ownsAutoHatch() then return false, "This account doesn't own the Auto Hatch gamepass." end
+	local stand = eggStands()[id]
+	if not stand then return false, id .. " isn't in this world or its area is locked." end
+	-- stand a few studs in front of the egg, on the side facing its platform
+	local eggPos = stand:GetPivot().Position
+	local platform = stand.Parent and stand.Parent.Parent and stand.Parent.Parent:FindFirstChild("PLATFORM")
+	local towards = platform and (platform:GetPivot().Position - eggPos) * Vector3.new(1, 0, 1) or Vector3.new(1, 0, 0)
+	if towards.Magnitude < 0.1 then towards = Vector3.new(1, 0, 0) end
+	local spot = eggPos + towards.Unit * 7
+	local char = LocalPlayer.Character
+	if char then char:PivotTo(CFrame.lookAt(spot, Vector3.new(eggPos.X, spot.Y, eggPos.Z))) end
+	Library.Variables.AutoHatchEggId = id
+	Library.Variables.AutoHatchEnabled = true
+	return true
+end
+
+-- lists for the dropdowns
+local function boardList()
+	local names = {}
+	for id in pairs(Library.Directory.Hoverboards) do names[#names + 1] = id end
+	table.sort(names, function(a, b)
+		local sa, sb = Library.Directory.Hoverboards[a].speed, Library.Directory.Hoverboards[b].speed
+		if sa ~= sb then return sa > sb end
+		return a < b
+	end)
+	return names
+end
+
+local PICK_AREA = "— pick an area —" -- Rayfield needs a dropdown to start with something selected
+local function areaList()
+	local world, names = Library.WorldCmds.Get(), {}
+	for id, area in pairs(Library.Directory.Areas) do
+		if area.world == world and not area.hidden and Library.WorldCmds.HasArea(id) then names[#names + 1] = id end
+	end
+	table.sort(names, function(a, b) return Library.Directory.Areas[a].mult < Library.Directory.Areas[b].mult end)
+	table.insert(names, 1, PICK_AREA)
+	return names
+end
+
+-- the window
+-- Rayfield normally goes in gethui(), but clicks on its dropdowns run in game threads that can't touch gethui() ("lacking
+-- capability Plugin"), so it goes in PlayerGui instead.
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+local old = playerGui:FindFirstChild("Rayfield")
+if old then old:Destroy() end
+local source = game:HttpGet("https://sirius.menu/rayfield")
+source = source:gsub("gethui%(%)", 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")')
+local Rayfield = loadstring(source)()
+env.ClassicRayfield = Rayfield
+local rayfieldGui = playerGui:FindFirstChild("Rayfield")
+if rayfieldGui then rayfieldGui.ResetOnSpawn = false end -- keep the window after dying
+
+local Window = Rayfield:CreateWindow({
+	Name = "⭐ Classic Event",
+	Icon = 0,
+	LoadingTitle = "Classic Event",
+	LoadingSubtitle = "menu",
+	ShowText = "Menu",
+	Theme = "Default",
+	ToggleUIKeybind = "F15", -- Rayfield's own key is parked on an unused key; the Settings tab's keybind hides the menu
+	DisableRayfieldPrompts = true,
+	DisableBuildWarnings = true,
+	ConfigurationSaving = { Enabled = false },
+	Discord = { Enabled = false },
+	KeySystem = false,
+})
+
+-- Farm
+local Farm = Window:CreateTab("Farm", "coins")
+Farm:CreateSection("🎯 Send pets")
+local function sendButton(mode)
+	local ok, text = sendPets(mode)
+	Rayfield:Notify({ Title = ok and "Pets sent" or "Send pets", Content = text, Duration = 2, Image = ok and "target" or "x" })
+end
+Farm:CreateButton({
+	Name = "🎯 Send all pets to the biggest coin here",
+	Callback = function() sendButton("biggest") end,
+})
+Farm:CreateButton({
+	Name = "📍 Send all pets to the nearest coin",
+	Callback = function() sendButton("nearest") end,
+})
+-- 🎯 quick button: a small draggable on-screen button (stays when the menu is hidden). One tap = one send.
+env.MenuQuickButton = env.MenuQuickButton or false
+local quickGui = playerGui:FindFirstChild("ClassicQuickSend")
+if quickGui then quickGui:Destroy() end
+quickGui = Instance.new("ScreenGui")
+quickGui.Name, quickGui.ResetOnSpawn, quickGui.DisplayOrder = "ClassicQuickSend", false, 50
+quickGui.Enabled = env.MenuQuickButton
+quickGui.Parent = playerGui
+local quick = Instance.new("TextButton")
+quick.Size, quick.Position = UDim2.fromOffset(64, 64), UDim2.new(1, -90, 0.55, 0)
+quick.BackgroundColor3, quick.Text, quick.TextSize = Color3.fromRGB(28, 28, 34), "🎯", 30
+quick.Font, quick.AutoButtonColor = Enum.Font.GothamBold, true
+quick.Parent = quickGui
+Instance.new("UICorner", quick).CornerRadius = UDim.new(1, 0)
+local quickStroke = Instance.new("UIStroke", quick)
+quickStroke.Color, quickStroke.Thickness = Color3.fromRGB(255, 196, 46), 2
+local dragStart, startPos, moved
+quick.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragStart, startPos, moved = input.Position, quick.Position, false
+	end
+end)
+quick.InputChanged:Connect(function(input)
+	if dragStart and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local d = input.Position - dragStart
+		if d.Magnitude > 6 then moved = true end
+		if moved then
+			quick.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		end
+	end
+end)
+quick.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		if dragStart and not moved then
+			local ok = sendPets("biggest")
+			quickStroke.Color = ok and Color3.fromRGB(70, 200, 90) or Color3.fromRGB(200, 50, 50)
+			task.delay(0.4, function() quickStroke.Color = Color3.fromRGB(255, 196, 46) end)
+		end
+		dragStart = nil
+	end
+end)
+Farm:CreateToggle({
+	Name = "🎯 Show quick button on screen (tap = send to biggest coin)",
+	CurrentValue = env.MenuQuickButton,
+	Flag = "QuickButton",
+	Callback = function(v)
+		env.MenuQuickButton = v
+		quickGui.Enabled = v
+	end,
+})
+Farm:CreateToggle({
+	Name = "👆 Send all pets (one click on a coin = all pets on it)",
+	CurrentValue = env.MenuSendAll,
+	Flag = "SendAll",
+	Callback = function(v) env.MenuSendAll = v end,
+})
+Farm:CreateSection("🥚 Hatch eggs (uses your Auto Hatch gamepass)")
+local hatchToggle
+local eggDropdown = Farm:CreateDropdown({
+	Name = "Egg (cheapest first)",
+	Options = eggList(),
+	CurrentOption = { env.MenuEgg or PICK_EGG },
+	MultipleOptions = false,
+	Flag = "HatchEgg",
+	Callback = function(options)
+		local pick = options[1]
+		if not pick or pick == PICK_EGG then return end
+		env.MenuEgg = pick
+		if Library.Variables.AutoHatchEnabled then -- already hatching: switch to the new egg
+			local ok, err = startHatching(pick)
+			if not ok then Rayfield:Notify({ Title = "Hatch", Content = err, Duration = 4, Image = "x" }) end
+		end
+	end,
+})
+hatchToggle = Farm:CreateToggle({
+	Name = "🥚 Hatch selected egg",
+	CurrentValue = Library.Variables.AutoHatchEnabled == true,
+	Flag = "HatchOn",
+	Callback = function(v)
+		if not v then return stopHatching() end
+		if not env.MenuEgg then
+			Rayfield:Notify({ Title = "Hatch", Content = "Pick an egg first.", Duration = 3, Image = "egg" })
+			return task.defer(function() hatchToggle:Set(false) end)
+		end
+		local ok, err = startHatching(env.MenuEgg)
+		if not ok then
+			Rayfield:Notify({ Title = "Hatch", Content = err, Duration = 4, Image = "x" })
+			task.defer(function() hatchToggle:Set(false) end)
+		end
+	end,
+})
+Farm:CreateButton({
+	Name = "🔄 Refresh eggs (after opening a gate)",
+	Callback = function() eggDropdown:Refresh(eggList()) end,
+})
+Farm:CreateSection("🐾 Pets")
+Farm:CreateToggle({
+	Name = "🐾 Pet Speed",
+	CurrentValue = env.MenuSpeed,
+	Flag = "PetSpeed",
+	Callback = function(v) env.MenuSpeed = v end,
+})
+Farm:CreateSlider({
+	Name = "Pet speed",
+	Range = { 1, 1000 },
+	Increment = 10,
+	Suffix = "",
+	CurrentValue = env.PetSpeedValue,
+	Flag = "PetSpeedValue",
+	Callback = function(v) env.PetSpeedValue = math.clamp(math.floor(v), 1, 1000) end,
+})
+
+-- Gamepasses: what the Magnet / Hoverboard / Teleport / Skip Egg Open passes do, on your side
+local Passes = Window:CreateTab("Gamepasses", "star")
+Passes:CreateSection("🥚 Fast hatch (Skip Egg Open)")
+Passes:CreateToggle({
+	Name = "🥚 Fast hatch (~2x faster)",
+	CurrentValue = env.MenuFastHatch,
+	Flag = "FastHatch",
+	Callback = function(v) env.MenuFastHatch = v end,
+})
+Passes:CreateParagraph({
+	Title = "How it works",
+	Content = "Click or tap during the egg animation to skip it. With the game's Auto Hatch on, every animation is skipped by itself. Pets and luck don't change: the server picks them.",
+})
+Passes:CreateSection("🛹 Hoverboard (press Q, or the game's hoverboard button on phone)")
+Passes:CreateToggle({
+	Name = "🛹 Hoverboard",
+	CurrentValue = env.MenuHover,
+	Flag = "Hoverboard",
+	Callback = function(v)
+		env.MenuHover = v
+		setHoverboard(v)
+	end,
+})
+Passes:CreateDropdown({
+	Name = "Board (fastest first)",
+	Options = boardList(),
+	CurrentOption = { env.MenuHoverBoard },
+	MultipleOptions = false,
+	Flag = "HoverBoard",
+	Callback = function(options)
+		local pick = options[1]
+		if pick and Library.Directory.Hoverboards[pick] then
+			env.MenuHoverBoard = pick
+			if env.MenuHover then setHoverboard(true) end
+		end
+	end,
+})
+Passes:CreateSection("🌀 Teleport")
+Passes:CreateToggle({
+	Name = "🌀 Unlock the game's Teleport menu",
+	CurrentValue = env.MenuTeleport,
+	Flag = "Teleport",
+	Callback = function(v) env.MenuTeleport = v end,
+})
+local areaDropdown = Passes:CreateDropdown({
+	Name = "Teleport to (your unlocked areas)",
+	Options = areaList(),
+	CurrentOption = { PICK_AREA },
+	MultipleOptions = false,
+	Flag = "TeleportArea",
+	Callback = function(options)
+		local area = options[1]
+		if not area or area == PICK_AREA then return end
+		if not Library.WorldCmds.HasArea(area) then
+			Rayfield:Notify({ Title = "Teleport", Content = area .. " is still locked.", Duration = 3, Image = "lock" })
+			return
+		end
+		local ok, err = teleportTo(area)
+		if not ok then Rayfield:Notify({ Title = "Teleport", Content = err, Duration = 3, Image = "x" }) end
+	end,
+})
+Passes:CreateButton({
+	Name = "🔄 Refresh areas (after opening a gate)",
+	Callback = function() areaDropdown:Refresh(areaList()) end,
+})
+Passes:CreateSection("🧲 Magnet")
+Passes:CreateToggle({
+	Name = "🧲 Orb Magnet",
+	CurrentValue = env.MenuOrb,
+	Flag = "OrbMagnet",
+	Callback = function(v)
+		env.MenuOrb = v
+		if not v then resetOrbs() end
+	end,
+})
+
+-- Settings
+local Settings = Window:CreateTab("Settings", "settings")
+Settings:CreateSection("Window")
+local hideKey
+hideKey = {
+	Name = "⌨️ Key to hide / show the menu (click, then press a key)",
+	CurrentKeybind = env.MenuHideKey,
+	HoldToInteract = false,
+	Flag = "HideKey",
+	Callback = function()
+		env.MenuHideKey = hideKey.CurrentKeybind -- remembered when the script is run again
+		Rayfield:SetVisibility(not Rayfield:IsVisible())
+	end,
+}
+Settings:CreateKeybind(hideKey)
+Settings:CreateParagraph({
+	Title = "Phone",
+	Content = "On phone, use the Menu button to show the window again.",
+})
+Settings:CreateSection("Optimization")
+Settings:CreateToggle({
+	Name = "📉 Low device mode (lowest graphics, no effects/shadows)",
+	CurrentValue = env.MenuLowMode,
+	Flag = "LowMode",
+	Callback = function(v)
+		env.MenuLowMode = v
+		setLowMode(v)
+	end,
+})
+Settings:CreateToggle({
+	Name = "🐾 Hide other players' pets",
+	CurrentValue = env.MenuHidePets,
+	Flag = "HidePets",
+	Callback = function(v) env.MenuHidePets = v end,
+})
+Settings:CreateToggle({
+	Name = "👥 Hide other players",
+	CurrentValue = env.MenuHidePlayers,
+	Flag = "HidePlayers",
+	Callback = function(v) env.MenuHidePlayers = v end,
+})
+Settings:CreateToggle({
+	Name = "⬛ Black screen (stop 3D rendering, for AFK)",
+	CurrentValue = env.MenuNo3D,
+	Flag = "No3D",
+	Callback = function(v)
+		env.MenuNo3D = v
+		RunService:Set3dRenderingEnabled(not v)
+	end,
+})
+Settings:CreateSlider({
+	Name = "FPS cap",
+	Range = { 5, 240 },
+	Increment = 5,
+	Suffix = " FPS",
+	CurrentValue = env.MenuFps,
+	Flag = "FpsCap",
+	Callback = function(v)
+		env.MenuFps = v
+		if setfpscap then setfpscap(v) end
+	end,
+})
+Settings:CreateSection("Close")
+Settings:CreateButton({
+	Name = "❌ Close menu and turn everything off",
+	Callback = function()
+		env.ClassicMenuRun = nil
+		env.MenuOrb, env.MenuSpeed, env.MenuHover = false, false, false
+		resetOrbs()
+		setHoverboard(false)
+		env.MenuLowMode, env.MenuHidePets, env.MenuHidePlayers, env.MenuNo3D = false, false, false, false
+		setLowMode(false)
+		showHidden()
+		RunService:Set3dRenderingEnabled(true)
+		pcall(function()
+			local s = Library.Save.Get()
+			setreadonly(s.Upgrades, false)
+			s.Upgrades["Pet Walkspeed"] = nil
+		end)
+		quickGui:Destroy()
+		env.ClassicRayfield = nil
+		Rayfield:Destroy()
+	end,
+})
