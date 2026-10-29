@@ -1,9 +1,9 @@
 -- Classic Event menu in a Rayfield window (open source UI: https://github.com/SiriusSoftwareLtd/Rayfield) with tabs:
 -- Farm (send pets buttons, hatch eggs, Pet Speed), Gamepasses (Fast hatch, Hoverboard, Teleport, Orb + Lootbag Magnet),
--- Settings (hide key,
--- low device mode, hide pets / players, black screen, FPS cap).
+-- Settings (hide key, low device mode, hide pets / players, black screen, FPS cap).
 -- Works on PC and phone. Everything only changes things on your side; the game sends its own requests.
--- K hides / shows the window (changeable in Settings).
+-- K hides / shows the window (changeable in Settings). Your options are saved to ClassicEventMenu/settings.json in the
+-- executor's workspace folder and come back the next time you run it.
 if not game:IsLoaded() then game.Loaded:Wait() end
 local env = getgenv()
 local Players = game:GetService("Players")
@@ -17,6 +17,41 @@ if parent:FindFirstChild("ClassicEventMenu") then parent.ClassicEventMenu:Destro
 if env.ClassicRayfield then pcall(function() env.ClassicRayfield:Destroy() end) end
 env.OrbMagnetOn, env.PetSpeedOn = false, false -- stops loops from an older copy
 task.wait(0.1)
+
+-- Saved options: loaded when the script starts in a new session (rejoin / restart); in the same session the live values
+-- win. The loop further down writes the file whenever something changes.
+local HttpService = game:GetService("HttpService")
+local SAVE_FOLDER, SAVE_FILE = "ClassicEventMenu", "ClassicEventMenu/settings.json"
+local SAVED_KEYS = {
+	"MenuOrb", "MenuSpeed", "PetSpeedValue", "MenuHover", "MenuHoverBoard", "MenuSendAll", "MenuTeleport",
+	"MenuFastHatch", "MenuLootMagnet", "MenuHideKey", "MenuLowMode", "MenuHidePets", "MenuHidePlayers", "MenuNo3D",
+	"MenuFps", "MenuFpsSet", "MenuQuickButton", "MenuEgg",
+}
+local function savedOptions()
+	local data = {}
+	for _, key in ipairs(SAVED_KEYS) do data[key] = env[key] end
+	return HttpService:JSONEncode(data)
+end
+local lastSaved
+env.ClassicSkipSave = nil
+local function saveOptions()
+	if env.ClassicSkipSave or not writefile then return end
+	local text = savedOptions()
+	if text == lastSaved then return end
+	pcall(function()
+		if makefolder and isfolder and not isfolder(SAVE_FOLDER) then makefolder(SAVE_FOLDER) end
+		writefile(SAVE_FILE, text)
+		lastSaved = text
+	end)
+end
+pcall(function()
+	if not (isfile and readfile and isfile(SAVE_FILE)) then return end
+	local data = HttpService:JSONDecode(readfile(SAVE_FILE))
+	for _, key in ipairs(SAVED_KEYS) do
+		if env[key] == nil and data[key] ~= nil then env[key] = data[key] end
+	end
+	if data.MenuFpsSet and data.MenuFps and setfpscap then setfpscap(data.MenuFps) end
+end)
 
 env.MenuOrb = env.MenuOrb == nil and true or env.MenuOrb
 env.MenuSpeed = env.MenuSpeed == nil and true or env.MenuSpeed
@@ -273,6 +308,7 @@ task.spawn(function()
 	while env.ClassicMenuRun == runId do
 		pcall(updateHidden)
 		applyRendering()
+		saveOptions()
 		task.wait(0.5)
 	end
 	-- menu closed: everything back to normal
@@ -601,63 +637,4 @@ local areaDropdown = Passes:CreateDropdown({
 	end,
 })
 Passes:CreateButton({
-	Name = "🔄 Refresh areas (after opening a gate)",
-	Callback = function() areaDropdown:Refresh(areaList()) end,
-})
-Passes:CreateSection("🧲 Magnet")
-Passes:CreateToggle({
-	Name = "🧲 Orb Magnet",
-	CurrentValue = env.MenuOrb,
-	Flag = "OrbMagnet",
-	Callback = function(v)
-		env.MenuOrb = v
-		if not v then resetOrbs() end
-	end,
-})
-Passes:CreateToggle({
-	Name = "💰 Lootbag Magnet (pulls lootbags to you)",
-	CurrentValue = env.MenuLootMagnet,
-	Flag = "LootMagnet",
-	Callback = function(v) env.MenuLootMagnet = v end,
-})
-
--- Settings
-local Settings = Window:CreateTab("Settings", "settings")
-Settings:CreateSection("Window")
-local hideKey
-hideKey = {
-	Name = "⌨️ Key to hide / show the menu (click, then press a key)",
-	CurrentKeybind = env.MenuHideKey,
-	HoldToInteract = false,
-	Flag = "HideKey",
-	Callback = function()
-		env.MenuHideKey = hideKey.CurrentKeybind -- remembered when the script is run again
-		Rayfield:SetVisibility(not Rayfield:IsVisible())
-	end,
-}
-Settings:CreateKeybind(hideKey)
-Settings:CreateParagraph({
-	Title = "Phone",
-	Content = "On phone, use the Menu button to show the window again.",
-})
-Settings:CreateSection("Optimization")
-Settings:CreateToggle({
-	Name = "📉 Low device mode (lowest graphics, no effects/shadows)",
-	CurrentValue = env.MenuLowMode,
-	Flag = "LowMode",
-	Callback = function(v)
-		env.MenuLowMode = v
-		setLowMode(v)
-	end,
-})
-Settings:CreateToggle({
-	Name = "🐾 Hide other players' pets",
-	CurrentValue = env.MenuHidePets,
-	Flag = "HidePets",
-	Callback = function(v) env.MenuHidePets = v end,
-})
-Settings:CreateToggle({
-	Name = "👥 Hide other players",
-	CurrentValue = env.MenuHidePlayers,
-	Flag = "HidePlayers",
-	Callbac
+	Name = "🔄 Refresh areas (
