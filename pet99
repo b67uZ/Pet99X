@@ -637,4 +637,123 @@ local areaDropdown = Passes:CreateDropdown({
 	end,
 })
 Passes:CreateButton({
-	Name = "🔄 Refresh areas (
+	Name = "🔄 Refresh areas (after opening a gate)",
+	Callback = function() areaDropdown:Refresh(areaList()) end,
+})
+Passes:CreateSection("🧲 Magnet")
+Passes:CreateToggle({
+	Name = "🧲 Orb Magnet",
+	CurrentValue = env.MenuOrb,
+	Flag = "OrbMagnet",
+	Callback = function(v)
+		env.MenuOrb = v
+		if not v then resetOrbs() end
+	end,
+})
+Passes:CreateToggle({
+	Name = "💰 Lootbag Magnet (pulls lootbags to you)",
+	CurrentValue = env.MenuLootMagnet,
+	Flag = "LootMagnet",
+	Callback = function(v) env.MenuLootMagnet = v end,
+})
+
+-- Settings
+local Settings = Window:CreateTab("Settings", "settings")
+Settings:CreateSection("Window")
+local hideKey
+hideKey = {
+	Name = "⌨️ Key to hide / show the menu (click, then press a key)",
+	CurrentKeybind = env.MenuHideKey,
+	HoldToInteract = false,
+	Flag = "HideKey",
+	Callback = function()
+		env.MenuHideKey = hideKey.CurrentKeybind -- remembered when the script is run again
+		Rayfield:SetVisibility(not Rayfield:IsVisible())
+	end,
+}
+Settings:CreateKeybind(hideKey)
+Settings:CreateParagraph({
+	Title = "Phone",
+	Content = "On phone, use the Menu button to show the window again.",
+})
+Settings:CreateSection("Optimization")
+Settings:CreateToggle({
+	Name = "📉 Low device mode (lowest graphics, no effects/shadows)",
+	CurrentValue = env.MenuLowMode,
+	Flag = "LowMode",
+	Callback = function(v)
+		env.MenuLowMode = v
+		setLowMode(v)
+	end,
+})
+Settings:CreateToggle({
+	Name = "🐾 Hide other players' pets",
+	CurrentValue = env.MenuHidePets,
+	Flag = "HidePets",
+	Callback = function(v) env.MenuHidePets = v end,
+})
+Settings:CreateToggle({
+	Name = "👥 Hide other players",
+	CurrentValue = env.MenuHidePlayers,
+	Flag = "HidePlayers",
+	Callback = function(v) env.MenuHidePlayers = v end,
+})
+Settings:CreateToggle({
+	Name = "⬛ Black screen (stop 3D rendering, for AFK)",
+	CurrentValue = env.MenuNo3D,
+	Flag = "No3D",
+	Callback = function(v)
+		env.MenuNo3D = v -- applied by the rendering loop
+	end,
+})
+Settings:CreateSlider({
+	Name = "FPS cap",
+	Range = { 5, 240 },
+	Increment = 5,
+	Suffix = " FPS",
+	CurrentValue = env.MenuFps,
+	Flag = "FpsCap",
+	Callback = function(v)
+		env.MenuFps, env.MenuFpsSet = v, true
+		if setfpscap then setfpscap(v) end
+	end,
+})
+Settings:CreateSection("Saved options")
+Settings:CreateParagraph({
+	Title = "💾 Your options are saved",
+	Content = "Everything you turn on or change here is saved and comes back the next time you run the menu (also after rejoining). Hatching never starts by itself.",
+})
+Settings:CreateButton({
+	Name = "♻️ Reset saved options to default (next run)",
+	Callback = function()
+		pcall(function() if delfile and isfile(SAVE_FILE) then delfile(SAVE_FILE) end end)
+		for _, key in ipairs(SAVED_KEYS) do env[key] = nil end
+		env.ClassicSkipSave = true -- don't write the current values back until the menu is run again
+		Rayfield:Notify({ Title = "Saved options", Content = "Reset. Run the menu again to start with the defaults.", Duration = 4, Image = "rotate-ccw" })
+	end,
+})
+Settings:CreateSection("Close")
+Settings:CreateButton({
+	Name = "❌ Close menu and turn everything off",
+	Callback = function()
+		env.ClassicMenuRun = nil
+		env.MenuOrb, env.MenuSpeed, env.MenuHover = false, false, false
+		resetOrbs()
+		setHoverboard(false)
+		env.MenuLowMode, env.MenuHidePets, env.MenuHidePlayers, env.MenuNo3D = false, false, false, false
+		setLowMode(false)
+		showHidden() -- 3D rendering / graphics quality are put back by the rendering loop when it stops
+		pcall(function()
+			local s = Library.Save.Get()
+			setreadonly(s.Upgrades, false)
+			s.Upgrades["Pet Walkspeed"] = nil
+		end)
+		quickGui:Destroy()
+		-- forget the live values (the save loop already stopped), so running the menu again loads your saved options
+		task.delay(1, function()
+			for _, key in ipairs(SAVED_KEYS) do env[key] = nil end
+		end)
+		env.ClassicRayfield = nil
+		Rayfield:Destroy()
+	end,
+})
