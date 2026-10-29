@@ -1,5 +1,6 @@
 -- Classic Event menu in a Rayfield window (open source UI: https://github.com/SiriusSoftwareLtd/Rayfield) with tabs:
--- Farm (send pets buttons, hatch eggs, Pet Speed), Gamepasses (Fast hatch, Hoverboard, Teleport, Orb Magnet), Settings (hide key,
+-- Farm (send pets buttons, hatch eggs, Pet Speed), Gamepasses (Fast hatch, Hoverboard, Teleport, Orb + Lootbag Magnet),
+-- Settings (hide key,
 -- low device mode, hide pets / players, black screen, FPS cap).
 -- Works on PC and phone. Everything only changes things on your side; the game sends its own requests.
 -- K hides / shows the window (changeable in Settings).
@@ -122,15 +123,22 @@ end
 
 -- Fast hatch: the egg animation acts as if you own "Skip Egg Open" (click to skip, and skipped by itself while
 -- Auto Hatch is on). Only the animation changes; the server already picked the pets before it starts.
+-- Lootbag magnet: lootbags act as if you own the "Magnet" pass, so the game's own lootbag script pulls them to you from
+-- anywhere and collects them (the request comes from the game's code, not the menu).
 env.MenuFastHatch = env.MenuFastHatch == nil and true or env.MenuFastHatch
+env.MenuLootMagnet = env.MenuLootMagnet == nil and true or env.MenuLootMagnet
 pcall(function()
 	local passes = Library.Gamepasses
 	local skipId = Library.Directory.Gamepasses["Skip Egg Open"].ID
+	local magnetId = Library.Directory.Gamepasses.Magnet.ID
 	env.ClassicOriginalOwns = env.ClassicOriginalOwns or passes.Owns
 	local original = env.ClassicOriginalOwns
 	setreadonly(passes, false)
 	passes.Owns = function(id, ...)
-		if id == skipId and env.MenuFastHatch and env.ClassicMenuRun ~= nil then return true end
+		if env.ClassicMenuRun ~= nil then
+			if id == skipId and env.MenuFastHatch then return true end
+			if id == magnetId and env.MenuLootMagnet then return true end
+		end
 		return original(id, ...)
 	end
 end)
@@ -170,7 +178,6 @@ end
 local function setLowMode(on)
 	if env.ClassicLowConn then env.ClassicLowConn:Disconnect() env.ClassicLowConn = nil end
 	if on then
-		pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
 		lowSaved[Lighting] = lowSaved[Lighting] or { GlobalShadows = Lighting.GlobalShadows }
 		Lighting.GlobalShadows = false
 		pcall(function()
@@ -181,7 +188,6 @@ local function setLowMode(on)
 		for _, obj in ipairs(workspace:GetDescendants()) do pcall(lowOne, obj) end
 		env.ClassicLowConn = workspace.DescendantAdded:Connect(function(obj) pcall(lowOne, obj) end)
 	else
-		pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic end)
 		for obj, props in pairs(lowSaved) do
 			pcall(function()
 				for k, v in pairs(props) do obj[k] = v end
@@ -248,12 +254,30 @@ end
 
 -- start with what was on last time (when the script is run again)
 if env.MenuLowMode then setLowMode(true) end
-RunService:Set3dRenderingEnabled(not env.MenuNo3D)
+-- Menu clicks run with the game's normal permissions, which can't change 3D rendering or graphics quality, so this
+-- loop (started by the executor, full permissions) applies them.
+local applied3D, appliedQuality
+local function applyRendering()
+	if applied3D ~= env.MenuNo3D then
+		applied3D = env.MenuNo3D
+		pcall(function() RunService:Set3dRenderingEnabled(not env.MenuNo3D) end)
+	end
+	if appliedQuality ~= env.MenuLowMode then
+		appliedQuality = env.MenuLowMode
+		pcall(function()
+			settings().Rendering.QualityLevel = env.MenuLowMode and Enum.QualityLevel.Level01 or Enum.QualityLevel.Automatic
+		end)
+	end
+end
 task.spawn(function()
 	while env.ClassicMenuRun == runId do
 		pcall(updateHidden)
-		task.wait(1)
+		applyRendering()
+		task.wait(0.5)
 	end
+	-- menu closed: everything back to normal
+	env.MenuNo3D, env.MenuLowMode = false, false
+	applyRendering()
 end)
 
 -- Send to biggest / nearest coin: one press sends all your pets to one coin in the area you're standing in. It fires the
@@ -590,6 +614,12 @@ Passes:CreateToggle({
 		if not v then resetOrbs() end
 	end,
 })
+Passes:CreateToggle({
+	Name = "💰 Lootbag Magnet (pulls lootbags to you)",
+	CurrentValue = env.MenuLootMagnet,
+	Flag = "LootMagnet",
+	Callback = function(v) env.MenuLootMagnet = v end,
+})
 
 -- Settings
 local Settings = Window:CreateTab("Settings", "settings")
@@ -630,48 +660,4 @@ Settings:CreateToggle({
 	Name = "👥 Hide other players",
 	CurrentValue = env.MenuHidePlayers,
 	Flag = "HidePlayers",
-	Callback = function(v) env.MenuHidePlayers = v end,
-})
-Settings:CreateToggle({
-	Name = "⬛ Black screen (stop 3D rendering, for AFK)",
-	CurrentValue = env.MenuNo3D,
-	Flag = "No3D",
-	Callback = function(v)
-		env.MenuNo3D = v
-		RunService:Set3dRenderingEnabled(not v)
-	end,
-})
-Settings:CreateSlider({
-	Name = "FPS cap",
-	Range = { 5, 240 },
-	Increment = 5,
-	Suffix = " FPS",
-	CurrentValue = env.MenuFps,
-	Flag = "FpsCap",
-	Callback = function(v)
-		env.MenuFps = v
-		if setfpscap then setfpscap(v) end
-	end,
-})
-Settings:CreateSection("Close")
-Settings:CreateButton({
-	Name = "❌ Close menu and turn everything off",
-	Callback = function()
-		env.ClassicMenuRun = nil
-		env.MenuOrb, env.MenuSpeed, env.MenuHover = false, false, false
-		resetOrbs()
-		setHoverboard(false)
-		env.MenuLowMode, env.MenuHidePets, env.MenuHidePlayers, env.MenuNo3D = false, false, false, false
-		setLowMode(false)
-		showHidden()
-		RunService:Set3dRenderingEnabled(true)
-		pcall(function()
-			local s = Library.Save.Get()
-			setreadonly(s.Upgrades, false)
-			s.Upgrades["Pet Walkspeed"] = nil
-		end)
-		quickGui:Destroy()
-		env.ClassicRayfield = nil
-		Rayfield:Destroy()
-	end,
-})
+	Callbac
